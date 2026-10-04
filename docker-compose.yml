@@ -1,0 +1,7 @@
+services:
+  api:
+    build: .
+    image: unit-convert-api
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
