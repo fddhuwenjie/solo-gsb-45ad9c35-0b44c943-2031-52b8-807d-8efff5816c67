@@ -29,6 +29,10 @@ def unknown_variable(name: str) -> ConversionError:
     return ConversionError("unknown_variable", f"公式引用了未提供的变量: {name!r}")
 
 
+def unknown_unit_set(set_id: str) -> ConversionError:
+    return ConversionError("unknown_unit_set", f"已发布的定义集不存在: {set_id!r}")
+
+
 def division_by_zero() -> ConversionError:
     return ConversionError("division_by_zero", "除数为零")
 

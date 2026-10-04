@@ -58,6 +58,23 @@ class CustomUnitItem(BaseModel):
 #: 三个换算接口均可携带的请求级自定义单位声明（1～6 项）。
 CustomUnits = list[CustomUnitItem]
 
+#: 已发布定义集标识字段的公共定义（与 custom_units 二选一）。
+_UNIT_SET_ID_FIELD = Field(
+    default=None,
+    min_length=1,
+    max_length=64,
+    description="已发布定义集标识（POST /unit-sets 的返回值）；"
+    "与 custom_units 二选一，同时出现返回 422",
+)
+
+
+def _reject_mixed_unit_sources(
+    custom_units: CustomUnits | None, unit_set_id: str | None
+) -> None:
+    """请求内 ``custom_units`` 与已发布定义集 ``unit_set_id`` 只能选择其一。"""
+    if unit_set_id is not None and custom_units:
+        raise ValueError("unit_set_id 与 custom_units 只能选择其一，不能同时出现")
+
 
 class ConvertRequest(BaseModel):
     """POST /convert 请求体。
@@ -77,6 +94,7 @@ class ConvertRequest(BaseModel):
         max_length=6,
         description="请求级自定义线性单位声明（1～6 项），仅在本次请求内有效",
     )
+    unit_set_id: str | None = _UNIT_SET_ID_FIELD
 
     @field_validator("value", mode="before")
     @classmethod
@@ -87,6 +105,11 @@ class ConvertRequest(BaseModel):
     @classmethod
     def _check_value(cls, d: Decimal) -> Decimal:
         return _check_value(d)
+
+    @model_validator(mode="after")
+    def _check_unit_source_exclusive(self) -> "ConvertRequest":
+        _reject_mixed_unit_sources(self.custom_units, self.unit_set_id)
+        return self
 
 
 class Variable(BaseModel):
@@ -125,6 +148,7 @@ class EvaluateRequest(BaseModel):
         max_length=6,
         description="请求级自定义线性单位声明（1～6 项），仅在本次请求内有效",
     )
+    unit_set_id: str | None = _UNIT_SET_ID_FIELD
 
     @field_validator("variables")
     @classmethod
@@ -136,6 +160,11 @@ class EvaluateRequest(BaseModel):
                     "仅含字母、数字、下划线，长度不超过 32"
                 )
         return variables
+
+    @model_validator(mode="after")
+    def _check_unit_source_exclusive(self) -> "EvaluateRequest":
+        _reject_mixed_unit_sources(self.custom_units, self.unit_set_id)
+        return self
 
 
 class SolveRequest(BaseModel):
@@ -161,6 +190,7 @@ class SolveRequest(BaseModel):
         max_length=6,
         description="请求级自定义线性单位声明（1～6 项），仅在本次请求内有效",
     )
+    unit_set_id: str | None = _UNIT_SET_ID_FIELD
 
     @field_validator("variables")
     @classmethod
@@ -195,6 +225,40 @@ class SolveRequest(BaseModel):
         if self.solve_for in self.variables:
             raise ValueError(f"solve_for {self.solve_for!r} 不得出现在 variables 中")
         return self
+
+    @model_validator(mode="after")
+    def _check_unit_source_exclusive(self) -> "SolveRequest":
+        _reject_mixed_unit_sources(self.custom_units, self.unit_set_id)
+        return self
+
+
+class PublishUnitSetRequest(BaseModel):
+    """POST /unit-sets 请求体：1～6 项与 ``custom_units`` 相同格式的定义。"""
+
+    units: CustomUnits = Field(
+        min_length=1,
+        max_length=6,
+        description="待发布的自定义线性单位定义（1～6 项），格式与 custom_units 相同；"
+        "按现有规则校验并展开全部条目，任一项非法则整次返回 422",
+    )
+
+
+class StoredUnitItem(BaseModel):
+    """已发布定义集中的单条定义（``factor`` 为十进制字符串，与提交内容一致）。"""
+
+    symbol: str = Field(description="自定义单位符号")
+    factor: str = Field(description="正十进制比例：1 symbol = factor 个 base_unit")
+    base_unit: str = Field(description="基准单位表达式")
+
+
+class UnitSetResponse(BaseModel):
+    """POST /unit-sets 的成功响应。"""
+
+    unit_set_id: str = Field(
+        description="服务生成的定义集标识；已发布内容不可改，可在 /convert、"
+        "/evaluate、/solve 中通过 unit_set_id 引用"
+    )
+    units: list[StoredUnitItem] = Field(description="已发布的定义条目")
 
 
 class ConvertResponse(BaseModel):

@@ -5,3 +5,11 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    environment:
+      # 已发布定义集的持久化文件（位于命名卷中，容器重建后仍可使用）
+      UNIT_API_UNIT_SETS_PATH: /app/data/unit_sets.json
+    volumes:
+      - unit-sets-data:/app/data
+
+volumes:
+  unit-sets-data:

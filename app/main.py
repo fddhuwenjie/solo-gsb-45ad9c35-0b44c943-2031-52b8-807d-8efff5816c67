@@ -15,18 +15,22 @@ from .converter import (
     is_absolute_target,
     to_decimal_str,
 )
-from .custom_units import build_scope
+from .custom_units import UnitScope, build_scope
 from .errors import ConversionError, affine_mixing
 from .evaluator import evaluate, make_quantity
 from .parser import ParsedExpression, canonical, canonical_dim, parse_expression
 from .schemas import (
     ConvertRequest,
     ConvertResponse,
+    CustomUnits,
     ErrorResponse,
     EvaluateRequest,
+    PublishUnitSetRequest,
     SolveRequest,
+    UnitSetResponse,
 )
 from .solver import solve
+from .unit_sets import STORE as unit_set_store
 from .units import ALIASES, PREFIXES, REGISTRY
 
 app = FastAPI(
@@ -36,6 +40,8 @@ app = FastAPI(
         "解析单位表达式（乘、除、整数幂），规范化量纲，支持 SI 词头与"
         "摄氏/华氏/开尔文仿射温标；/evaluate 支持带单位的变量公式求值，"
         "/solve 支持用带单位的等式反求一个未知量（未知量须处于一次线性位置），"
+        "/unit-sets 把自定义单位发布为可复用定义集（持久化、内容不可改），"
+        "三个换算接口可按 unit_set_id 选用；"
         "所有结果均为精确十进制，维度不兼容、未知符号、非法幂、除零、"
         "非法仿射用法、非线性方程、零系数或精度溢出时返回 422。"
     ),
@@ -78,6 +84,34 @@ async def validation_error_handler(_: Request, exc: RequestValidationError) -> J
 # ---------------------------------------------------------------------------
 
 
+def _request_scope(
+    custom_units: CustomUnits | None, unit_set_id: str | None
+) -> UnitScope | None:
+    """确定本次调用的单位定义来源（源、目标与变量单位共用同一份定义）。
+
+    指定 ``unit_set_id`` 时按已发布定义集现场构建独立上下文（标识不存在
+    返回 422）；否则沿用请求内 ``custom_units``；两者都缺省时返回 ``None``
+    （三个接口的原有行为）。schema 层已保证两种方式不会同时出现。
+    """
+
+    if unit_set_id is not None:
+        return unit_set_store.build_scope(unit_set_id)
+    return build_scope(custom_units)
+
+
+@app.post(
+    "/unit-sets",
+    response_model=UnitSetResponse,
+    responses={422: {"model": ErrorResponse, "description": "定义集非法"}},
+    summary="把自定义单位发布为可复用的定义集",
+)
+def publish_unit_set(req: PublishUnitSetRequest) -> UnitSetResponse:
+    # 先按现有规则校验并展开全部条目，任一项非法则 422 且不留可引用的集合；
+    # 已发布内容不可改，重复发布相同内容会得到新的标识
+    set_id, units = unit_set_store.publish(req.units)
+    return UnitSetResponse(unit_set_id=set_id, units=units)
+
+
 @app.post(
     "/convert",
     response_model=ConvertResponse,
@@ -85,7 +119,7 @@ async def validation_error_handler(_: Request, exc: RequestValidationError) -> J
     summary="单位换算",
 )
 def convert_endpoint(req: ConvertRequest) -> ConvertResponse:
-    scope = build_scope(req.custom_units)
+    scope = _request_scope(req.custom_units, req.unit_set_id)
     src = parse_expression(req.from_unit, scope)
     dst = parse_expression(req.to_unit, scope)
     value = convert(req.value, src, dst)
@@ -103,7 +137,7 @@ def convert_endpoint(req: ConvertRequest) -> ConvertResponse:
     summary="带单位的变量公式求值并换算到目标单位",
 )
 def evaluate_endpoint(req: EvaluateRequest) -> ConvertResponse:
-    scope = build_scope(req.custom_units)
+    scope = _request_scope(req.custom_units, req.unit_set_id)
     # 变量先解析单位并折叠为 SI 口径的精确量；未知单位在此即报 422
     quantities = {
         name: make_quantity(var.value, parse_expression(var.unit, scope))
@@ -140,7 +174,7 @@ def evaluate_endpoint(req: EvaluateRequest) -> ConvertResponse:
     summary="用带单位的等式反求一个未知量",
 )
 def solve_endpoint(req: SolveRequest) -> ConvertResponse:
-    scope = build_scope(req.custom_units)
+    scope = _request_scope(req.custom_units, req.unit_set_id)
     # 变量先解析单位并折叠为 SI 口径的精确量；未知单位在此即报 422
     quantities = {
         name: make_quantity(var.value, parse_expression(var.unit, scope))

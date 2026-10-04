@@ -10,3 +10,7 @@ MAX_PRECISION: int = int(os.environ.get("UNIT_API_MAX_PRECISION", "50"))
 
 #: 单位幂指数允许的最大绝对值，超出视为“非法幂”。
 MAX_POWER: int = int(os.environ.get("UNIT_API_MAX_POWER", "99"))
+
+#: 已发布定义集（unit set）的持久化文件路径（JSON）。Compose 部署时指向
+#: 命名卷，容器重建后已发布集合仍可使用。可通过环境变量覆盖。
+UNIT_SETS_PATH: str = os.environ.get("UNIT_API_UNIT_SETS_PATH", "data/unit_sets.json")
