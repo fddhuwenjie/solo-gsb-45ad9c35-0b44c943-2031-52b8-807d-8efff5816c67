@@ -14,6 +14,7 @@
 - **仿射温标**：`degC`（°C）、`degF`（°F）、`K` 互为绝对温度换算；温差单位 `dC`/`dF`/`dK` 严格隔离，**禁止温差与绝对温度混算**；公式中的绝对温标变量只能作为唯一项
 - **精确十进制**：内部使用有理数精确运算；结果不能表示为有限十进制或超过精度上限时返回 422，绝不输出舍入值
 - **请求级自定义单位**：三个接口均可携带 1～6 项 `custom_units`（`symbol`/正十进制 `factor`/`base_unit`，含义为 `1 symbol = factor 个 base_unit`），支持前向引用与链式定义；自定义符号不与内置单位/词头冲突、不自动获得词头、不能引用 `degC`/`degF`/裸 `K`，且仅在本次请求内有效（不修改全局单位表，并发安全）
+- **可复用定义集发布（`POST /custom-unit-sets`）**：把 1～6 项已按上述规则校验并展开的定义发布为**可复用定义集**，服务生成不可猜测的标识；已发布内容不可修改，三个接口可凭 `custom_unit_set_id` 选用（与请求内 `custom_units` 互斥），定义落盘保存，**容器重建后仍可使用**
 - **统一 422**：维度不兼容、未知变量/符号、非法幂、除零、非法仿射用法、非线性方程、零系数、精度溢出均返回 422 且不产出结果
 
 ## 快速开始
@@ -55,7 +56,8 @@ pytest            # 运行测试
 | `value` | 十进制数/字符串 | 定值；建议用字符串传递以保证十进制精确性 |
 | `from`  | 字符串        | 源单位表达式                               |
 | `to`    | 字符串        | 目标单位表达式                             |
-| `custom_units` | 数组（可省略） | 1～6 项请求级自定义单位声明，详见下文 |
+| `custom_units` | 数组（可省略） | 1～6 项请求级自定义单位声明，详见下文；与 `custom_unit_set_id` 互斥 |
+| `custom_unit_set_id` | 字符串（可省略） | 已发布自定义单位定义集标识，详见下文；不存在返回 422；与 `custom_units` 互斥 |
 
 成功响应 `200`：
 
@@ -171,6 +173,104 @@ curl -X POST http://localhost:8000/convert \
 - 重名、循环引用（含自引用）、未知引用、非法比例（非正数/非有限十进制/超过 50 位有效数字）、
   非法符号或禁引温标均使**整次请求返回 422**——即使该符号没有被源/目标表达式实际使用
 
+### 发布可复用的自定义单位定义集
+
+通过 `POST /custom-unit-sets` 可把 1～6 项**现有 `custom_units` 格式**的定义发布为可复用的
+定义集。服务端会先按上一节的全部规则**校验并展开每一个条目**（链式/前向引用同样立即展开）：
+
+- 任一条目非法（重名、与内置单位/词头冲突、循环、未知引用、非法比例、禁引温标等）
+  整次发布返回 **422**，**不会生成标识、不会留下任何可引用的定义集**（也不写盘）；
+- 成功返回 **201** 与服务生成的标识 `id`（不可猜测），同时回显已发布条目，
+  `factor` 为精确十进制字符串；
+- **已发布内容不可修改**：服务不提供更新/删除接口；以相同内容再次发布会得到一个**新标识**，
+  旧标识含义不变。
+
+```bash
+curl -X POST http://localhost:8000/custom-unit-sets \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "custom_units": [
+      {"symbol": "furlong", "factor": "10",  "base_unit": "chain"},
+      {"symbol": "chain",   "factor": "22",  "base_unit": "m"},
+      {"symbol": "ft",      "factor": "0.3048", "base_unit": "m"}
+    ]
+  }'
+```
+
+```json
+{
+  "id": "cus_82327f8def2025cf00cd703f12b95c8c",
+  "custom_units": [
+    {"symbol": "furlong", "factor": "10",     "base_unit": "chain"},
+    {"symbol": "chain",   "factor": "22",     "base_unit": "m"},
+    {"symbol": "ft",      "factor": "0.3048", "base_unit": "m"}
+  ]
+}
+```
+
+之后在 `/convert`、`/evaluate`、`/solve` 请求体中携带 `custom_unit_set_id` 即可选用该组定义，
+**一次调用的源、目标与变量单位都按同一份定义解析**：
+
+```bash
+# 2 furlong = 2 * 10 chain = 20 * 22 m = 440 m
+curl -X POST http://localhost:8000/convert \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "value": "2",
+    "from": "furlong",
+    "to": "m",
+    "custom_unit_set_id": "cus_82327f8def2025cf00cd703f12b95c8c"
+  }'
+```
+
+```json
+{"value": "440", "unit": "m", "dimension": "m"}
+```
+
+`/evaluate`、`/solve` 用法相同（变量单位与 `output_unit` 也在该定义集下解析）：
+
+```bash
+# /evaluate
+curl -X POST http://localhost:8000/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "variables": {"n": {"value": "10", "unit": "ft"}, "w": {"value": "2", "unit": "ft"}},
+    "formula": "n*w",
+    "output_unit": "ft^2",
+    "custom_unit_set_id": "<已发布的标识>"
+  }'
+# -> {"value": "20", "unit": "ft^2", "dimension": "m^2"}
+
+# /solve
+curl -X POST http://localhost:8000/solve \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "variables": {"a": {"value": "3", "unit": "ft"}},
+    "equation": "x = a",
+    "solve_for": "x",
+    "output_unit": "m",
+    "custom_unit_set_id": "<已发布的标识>"
+  }'
+# -> {"value": "0.9144", "unit": "m", "dimension": "m"}
+```
+
+**选用规则**：
+
+| 请求中的字段                         | 行为                                                             |
+| ------------------------------------ | ---------------------------------------------------------------- |
+| 只有 `custom_units`                  | 沿用请求级定义（原有行为，仅本次请求有效）                        |
+| 只有 `custom_unit_set_id`            | 按已发布定义集解析；**标识不存在整次请求返回 422**                |
+| 两者同时出现                         | **整次请求返回 422**（一次调用只能使用一种自定义单位来源）        |
+| 两者都不带                           | 三个接口保持原有行为与响应，不使用任何自定义单位                  |
+
+- 不同定义集允许对**同名符号**给出不同含义；每次调用都构造独立的解析上下文，
+  并发调用互不污染，也不会改写全局单位表；
+- 定义集保存在数据目录（默认 `/data`，可用环境变量 `UNIT_API_DATA_DIR` 覆盖）的
+  `custom_unit_sets.json` 中；Docker Compose 已把命名卷 `unit_sets_data` 挂载到该目录，
+  **容器重建/进程重启后已发布的定义集仍可使用**；
+- 示例：发布一组长度定义后把服务停掉再 `docker compose up`，原 `id` 依然可用于换算；
+  重启后还可继续发布新定义集，旧定义不受影响。
+
 ### `POST /evaluate`
 
 对带单位的变量映射与公式求值，并把结果**精确换算**到 `output_unit`。
@@ -182,7 +282,8 @@ curl -X POST http://localhost:8000/convert \
 | `variables`   | 对象   | 1～20 个变量映射；键为变量名，值为 `{"value", "unit"}`      |
 | `formula`     | 字符串 | 求值公式（见下文语法）                                      |
 | `output_unit` | 字符串 | 结果目标单位表达式                                          |
-| `custom_units`| 数组（可省略） | 1～6 项请求级自定义单位声明，详见上文                |
+| `custom_units`| 数组（可省略） | 1～6 项请求级自定义单位声明，详见上文；与 `custom_unit_set_id` 互斥 |
+| `custom_unit_set_id` | 字符串（可省略） | 已发布自定义单位定义集标识；不存在返回 422；与 `custom_units` 互斥 |
 
 变量名须以字母或下划线开头，仅含字母、数字、下划线（≤32 字符）；
 `value` 同样建议以 JSON 字符串传递以保证十进制精确性。成功响应与 `/convert` 相同。
@@ -257,7 +358,8 @@ curl -X POST http://localhost:8000/evaluate \
 | `equation`    | 字符串 | 含**恰好一个等号**的等式，两侧语法同 `/evaluate` 的公式      |
 | `solve_for`   | 字符串 | 待解未知量的名称（不得出现在 `variables` 中）                |
 | `output_unit` | 字符串 | 结果目标单位表达式，**须为线性单位**（不能是 `degC`/`degF`） |
-| `custom_units`| 数组（可省略） | 1～6 项请求级自定义单位声明，详见上文                |
+| `custom_units`| 数组（可省略） | 1～6 项请求级自定义单位声明，详见上文；与 `custom_unit_set_id` 互斥 |
+| `custom_unit_set_id` | 字符串（可省略） | 已发布自定义单位定义集标识；不存在返回 422；与 `custom_units` 互斥 |
 
 成功响应与 `/convert` 相同（`value`/`unit`/`dimension`）。
 
@@ -326,6 +428,7 @@ curl -X POST http://localhost:8000/solve \
 
 | 端点         | 说明                             |
 | ------------ | -------------------------------- |
+| `POST /custom-unit-sets` | 发布 1～6 项自定义单位定义为可复用定义集，返回服务生成标识（201） |
 | `GET /units` | 列出全部单位、词头与别名         |
 | `GET /health`| 健康检查                         |
 | `GET /`      | 服务信息                         |
@@ -398,7 +501,7 @@ PRIMARY:= "(" expr ")" | VARIABLE | DECIMAL
 
 | 错误码               | 含义                                   |
 | -------------------- | -------------------------------------- |
-| `invalid_request`    | 请求参数校验失败（缺字段、值非法等；自定义单位的重名/符号冲突/循环引用/非法比例/禁引温标也归入此码）   |
+| `invalid_request`    | 请求参数校验失败（缺字段、值非法等；自定义单位的重名/符号冲突/循环引用/非法比例/禁引温标，以及 `custom_units` 与 `custom_unit_set_id` 同时出现、引用的定义集标识不存在也归入此码）   |
 | `invalid_syntax`     | 表达式/公式语法错误（含隐式相乘）      |
 | `unknown_symbol`     | 未知单位符号（含自定义单位的 `base_unit` 引用了未声明符号） |
 | `unknown_variable`   | 公式引用了未在变量映射中提供的变量     |
@@ -421,14 +524,16 @@ app/
   solver.py     # 等式求解器（未知量一次系数/常数的 Fraction 构建与量纲校验）
   units.py      # 单位注册表、SI 词头与别名
   custom_units.py  # 请求级自定义单位（custom_units）：冲突/循环/禁引校验与链式解析
+  unit_sets.py  # 已发布定义集：校验发布、标识生成、线程安全与 JSON 落盘/重载
   converter.py  # 量纲校验、仿射规则与精确十进制换算
   errors.py     # 领域错误（统一映射 422）
-  config.py     # 精度/幂次上限配置
+  config.py     # 精度/幂次上限/数据目录配置
 tests/
   test_api.py       # /convert 端到端测试
   test_evaluate.py  # /evaluate 端到端测试
   test_solve.py     # /solve 端到端测试
   test_custom_units.py  # 请求级自定义单位（三个接口）端到端测试
+  test_unit_sets.py     # 可复用定义集发布/选用/互斥/隔离/不可变/持久化测试
 Dockerfile
-docker-compose.yml
+docker-compose.yml  # 命名卷 unit_sets_data -> /data，持久化已发布定义集
 ```

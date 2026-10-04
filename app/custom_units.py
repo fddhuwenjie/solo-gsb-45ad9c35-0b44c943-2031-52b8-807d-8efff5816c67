@@ -154,3 +154,31 @@ def build_scope(items: Iterable[CustomUnitSpec] | None) -> UnitScope | None:
         for item in items
     ]
     return UnitScope(specs)
+
+
+def scope_for_request(
+    custom_units: Iterable[CustomUnitSpec] | None,
+    custom_unit_set_id: str | None = None,
+    *,
+    store: "UnitSetStore | None" = None,
+) -> UnitScope | None:
+    """按请求选择自定义单位来源并构造请求级上下文。
+
+    - 携带请求内 ``custom_units``：按原有规则就地构造（仅本次请求有效）；
+    - 携带 ``custom_unit_set_id``：加载对应**已发布**定义集；标识不存在时
+      抛出 422；
+    - 二者都缺省：返回 ``None``，三个接口保持原有行为。
+
+    ``custom_units`` 与 ``custom_unit_set_id`` 同时出现由 schema 层
+    （:class:`~app.schemas.CustomUnitsSelectionModel`）先行拒绝为 422。
+    每次调用都返回独立的 :class:`UnitScope`，不同请求（含并发）互不污染。
+    """
+
+    if custom_units is not None:
+        return build_scope(custom_units)
+    if custom_unit_set_id is not None:
+        from .unit_sets import UnitSetStore, get_store
+
+        chosen: UnitSetStore = store or get_store()
+        return chosen.build_scope(custom_unit_set_id)
+    return None
